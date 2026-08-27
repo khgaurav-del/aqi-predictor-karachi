@@ -1,0 +1,40 @@
+name: Daily Model Training
+
+on:
+  schedule:
+    # Runs once a day at 2:00 AM UTC — after several hours of fresh feature
+    # collection has accumulated, before Karachi's morning (UTC+5, so ~7 AM local).
+    - cron: "0 2 * * *"
+  workflow_dispatch:  # allows manual trigger from the Actions tab for testing
+
+permissions:
+  contents: write  # needed to commit updated model files back to the repo
+
+jobs:
+  train-model:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run training pipeline
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+        run: python -m src.training_pipeline
+
+      - name: Commit updated model files
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          git add models/*.joblib
+          git diff --staged --quiet || git commit -m "Auto-retrain: update models [skip ci]"
+          git push

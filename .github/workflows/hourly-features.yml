@@ -1,0 +1,29 @@
+name: Hourly Feature Collection
+
+on:
+  schedule:
+    # Runs at minute 5 of every hour (UTC). Offset by 5 min so it doesn't
+    # collide with GitHub's own top-of-hour scheduling congestion.
+    - cron: "5 * * * *"
+  workflow_dispatch:  # allows manual trigger from the Actions tab for testing
+
+jobs:
+  collect-features:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run feature pipeline (current hour)
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+        run: python -m src.feature_pipeline
