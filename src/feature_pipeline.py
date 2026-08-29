@@ -130,13 +130,18 @@ def add_target_and_lags(df):
     return df
 
 
-def build_feature_frame(pollution_df: pd.DataFrame, weather_df: pd.DataFrame) -> pd.DataFrame:
+def build_feature_frame(pollution_df: pd.DataFrame, weather_df: pd.DataFrame, recompute_derived: bool = True) -> pd.DataFrame:
     # Align both sources to the hour and merge
     pollution_df["datetime"] = pollution_df["datetime"].dt.floor("h")
     weather_df["datetime"] = weather_df["datetime"].dt.floor("h")
     merged = pd.merge(pollution_df, weather_df, on="datetime", how="inner")
     merged = add_time_features(merged)
-    merged = add_target_and_lags(merged)
+    if recompute_derived:
+        merged = add_target_and_lags(merged)
+    else:
+        # Just the EPA AQI target for this row; lag/rolling features get
+        # computed later against full history (see run_current).
+        merged["aqi"] = merged["pm2_5"].apply(pm25_to_aqi)
     return merged
 
 
@@ -144,19 +149,39 @@ def build_feature_frame(pollution_df: pd.DataFrame, weather_df: pd.DataFrame) ->
 # MAIN FLOWS
 # ---------------------------------------------------------------------------
 def run_current(db: Database):
-    """Fetch the latest pollution + today's weather, store the newest row(s)."""
+    """Fetch the latest pollution + today's weather, recompute lag/rolling
+    features using recent history from the store (not just this new row),
+    and store the newest row.
+
+    IMPORTANT: lag/rolling features (24h/48h/72h lags, 72h rolling stats)
+    need prior history to compute correctly. Computing them against only
+    the single newly-fetched row would leave them all NaN — this pulls the
+    last ~80h of existing data from Mongo first so the new row's derived
+    features are computed properly, matching what backfill does.
+    """
     pollution_records = fetch_current_pollution()
     pollution_df = pollution_list_to_df(pollution_records)
 
     today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     weather_df = fetch_weather_range(today, today)
 
-    merged = build_feature_frame(pollution_df, weather_df)
-    if merged.empty:
+    new_rows = build_feature_frame(pollution_df, weather_df, recompute_derived=False)
+    if new_rows.empty:
         print("[current] No matching pollution+weather rows this hour (weather data may lag). Skipping.")
         return
 
-    records = merged.replace({np.nan: None}).to_dict("records")
+    # Pull recent history (80h buffer covers the 72h lag window) to recompute
+    # lag/rolling features correctly for the new row(s).
+    history_df = db.load_recent_features(hours=80)
+    combined = pd.concat([history_df, new_rows[["datetime"] + [c for c in new_rows.columns if c not in history_df.columns or c == "datetime"]]], ignore_index=True) if not history_df.empty else new_rows
+    combined = combined.drop_duplicates(subset="datetime").sort_values("datetime").reset_index(drop=True)
+    combined = add_target_and_lags(combined)
+
+    # Only the newest row(s) — matching the timestamps we just fetched — get inserted
+    new_timestamps = set(new_rows["datetime"])
+    to_insert = combined[combined["datetime"].isin(new_timestamps)]
+
+    records = to_insert.replace({np.nan: None}).to_dict("records")
     inserted = db.upsert_features(records)
     print(f"[current] Fetched {len(records)} row(s), inserted {inserted} new. Total in store: {db.count_features()}")
 

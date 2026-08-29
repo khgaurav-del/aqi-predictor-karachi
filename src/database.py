@@ -19,18 +19,34 @@ class Database:
 
     # ---------------- Features ----------------
     def upsert_features(self, records: list[dict]) -> int:
-        """Insert feature rows, skipping ones that already exist (by datetime)."""
-        inserted = 0
+        """Insert or update feature rows by datetime (true upsert).
+
+        Uses replace_one(upsert=True) rather than insert_one, so re-running
+        the pipeline for an hour that already exists (e.g. because it was
+        stored with stale/incorrect derived features before a bug fix)
+        overwrites the old row instead of silently skipping it.
+        """
+        upserted = 0
         for rec in records:
-            try:
-                self.features.insert_one(rec)
-                inserted += 1
-            except DuplicateKeyError:
-                continue
-        return inserted
+            result = self.features.replace_one({"datetime": rec["datetime"]}, rec, upsert=True)
+            if result.upserted_id is not None or result.modified_count > 0:
+                upserted += 1
+        return upserted
 
     def load_all_features(self) -> pd.DataFrame:
         cursor = self.features.find({}, {"_id": 0}).sort("datetime", ASCENDING)
+        df = pd.DataFrame(list(cursor))
+        if not df.empty:
+            df["datetime"] = pd.to_datetime(df["datetime"])
+        return df
+
+    def load_recent_features(self, hours: int = 80) -> pd.DataFrame:
+        """Load only the most recent N hours of rows — used by the hourly
+        pipeline to recompute lag/rolling features without pulling the
+        entire feature store every run."""
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+        cursor = self.features.find({"datetime": {"$gte": cutoff}}, {"_id": 0}).sort("datetime", ASCENDING)
         df = pd.DataFrame(list(cursor))
         if not df.empty:
             df["datetime"] = pd.to_datetime(df["datetime"])
