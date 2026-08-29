@@ -1,10 +1,10 @@
 """
-Pearls AQI Predictor — Dashboard
-==================================
-Shows current AQI for Karachi, a 72h-ahead forecast from the trained model,
-and a hazard alert banner. Deploy on Streamlit Community Cloud.
+Pearls AQI Predictor dashboard.
 
-Secrets needed (Streamlit Cloud -> App settings -> Secrets):
+Shows the current AQI for Karachi, a 72-hour forecast from the trained model,
+and a simple hazard alert banner. Designed for Streamlit Community Cloud.
+
+Secrets needed in Streamlit Cloud -> App settings -> Secrets:
     MONGODB_URI = "mongodb+srv://..."
     OPENWEATHER_API_KEY = "..."
 """
@@ -18,11 +18,11 @@ from src.database import Database
 from src.aqi_utils import aqi_category
 
 # ---------------------------------------------------------------------------
-# Streamlit secrets -> environment variables (so src/config.py keeps working
-# unchanged whether run locally with `set`/`export` or deployed on Cloud)
+# Map Streamlit secrets into environment variables so src/config.py keeps
+# working the same way locally and in the cloud.
 # ---------------------------------------------------------------------------
 if "MONGODB_URI" in os.environ:
-    pass  # already set locally via `set`/`export`
+    pass  # already available from the local environment
 else:
     try:
         if "MONGODB_URI" in st.secrets:
@@ -30,7 +30,7 @@ else:
         if "OPENWEATHER_API_KEY" in st.secrets:
             os.environ["OPENWEATHER_API_KEY"] = st.secrets["OPENWEATHER_API_KEY"]
     except Exception:
-        pass  # no secrets.toml locally — fine, rely on real env vars instead
+        pass  # no local secrets file; fall back to real environment variables
 
 st.set_page_config(page_title="Pearls AQI Predictor — Karachi", page_icon="🌫️", layout="centered")
 
@@ -39,7 +39,7 @@ FEATURE_COLUMNS_PATH = "models/feature_columns.joblib"
 
 
 # ---------------------------------------------------------------------------
-# Cached loaders — avoid re-hitting Mongo / re-reading disk on every rerun
+# Cached loaders that keep reruns from hitting Mongo or disk every time.
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def load_model():
@@ -60,7 +60,7 @@ def hazard_alert(aqi_value: float):
     if aqi_value is None or np.isnan(aqi_value):
         return None
     if aqi_value <= 100:
-        return None  # no alert needed for Good/Moderate
+        return None  # no alert needed for Good or Moderate air
     elif aqi_value <= 150:
         return ("warning", "Unhealthy for Sensitive Groups — people with respiratory issues should limit outdoor exposure.")
     elif aqi_value <= 200:
@@ -72,7 +72,7 @@ def hazard_alert(aqi_value: float):
 
 
 # ---------------------------------------------------------------------------
-# UI
+# Main UI
 # ---------------------------------------------------------------------------
 st.title("🌫️ Pearls AQI Predictor")
 st.caption("Karachi, Pakistan — 72-hour air quality forecast")
@@ -102,7 +102,7 @@ current_aqi = latest["aqi"]
 current_category = aqi_category(current_aqi)
 latest_time = latest["datetime"]
 
-# --- Current AQI ---
+# Current AQI
 col1, col2 = st.columns(2)
 with col1:
     st.metric("Current AQI", f"{current_aqi:.0f}", help=current_category)
@@ -110,7 +110,7 @@ with col1:
 with col2:
     st.metric("Last updated", latest_time.strftime("%Y-%m-%d %H:%M UTC"))
 
-# --- 72h Forecast ---
+# 72-hour forecast
 st.subheader("72-Hour Forecast")
 
 missing = [c for c in feature_cols if c not in df.columns]
@@ -118,7 +118,7 @@ if missing:
     st.error(f"Feature mismatch — missing columns for prediction: {missing}")
     st.stop()
 
-latest_row = df[feature_cols].iloc[[-1]]  # keep as DataFrame (1 row)
+latest_row = df[feature_cols].iloc[[-1]]  # keep it as a one-row DataFrame
 if latest_row.isnull().any(axis=1).iloc[0]:
     st.warning(
         "The most recent row has missing lag/rolling features (needs 72h of prior "
@@ -133,11 +133,11 @@ st.metric(
     "Predicted AQI (72h from now)",
     f"{forecast_aqi:.0f}",
     delta=f"{delta:+.0f} vs current",
-    delta_color="inverse",  # rising AQI (worse air) shown as "bad" in red
+    delta_color="inverse",  # higher AQI means worse air, so higher is red
 )
 st.caption(f"Predicted category: **{forecast_category}**")
 
-# --- Hazard alert ---
+# Hazard alert
 alert = hazard_alert(forecast_aqi)
 if alert:
     level, message = alert
@@ -148,7 +148,7 @@ if alert:
 else:
     st.success("✅ No hazard expected in the 72h forecast.")
 
-# --- Recent trend ---
+# Recent trend
 st.subheader("Recent AQI Trend")
 recent = df.tail(72)[["datetime", "aqi"]].set_index("datetime")
 st.line_chart(recent)

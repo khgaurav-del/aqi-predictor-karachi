@@ -1,14 +1,14 @@
 """
-Feature Pipeline v2 - Pearls AQI Predictor (Karachi)
-=====================================================
-- Weather: Open-Meteo (free, no key, has historical archive)
+Feature pipeline for Pearls AQI Predictor (Karachi).
+
+- Weather: Open-Meteo (free, no key, with historical archive access)
 - Pollutants: OpenWeather Air Pollution API
 - Target: US EPA AQI (0-500) computed from PM2.5
-- Storage: MongoDB Atlas ("features" collection = our feature store)
+- Storage: MongoDB Atlas, with the features collection acting as the store
 
 Usage:
-    python -m src.feature_pipeline                 # current hour (for hourly cron)
-    python -m src.feature_pipeline --backfill 60    # backfill last 60 days (training data)
+    python -m src.feature_pipeline                 # current hour for the cron job
+    python -m src.feature_pipeline --backfill 60    # backfill the last 60 days
 """
 import sys
 import time
@@ -25,7 +25,7 @@ from .aqi_utils import pm25_to_aqi
 
 
 # ---------------------------------------------------------------------------
-# FETCHING — Pollutants (OpenWeather)
+# Fetching pollutants from OpenWeather.
 # ---------------------------------------------------------------------------
 def fetch_current_pollution():
     params = {"lat": config.LATITUDE, "lon": config.LONGITUDE, "appid": config.OPENWEATHER_API_KEY}
@@ -59,12 +59,14 @@ def pollution_list_to_df(records):
 
 
 # ---------------------------------------------------------------------------
-# FETCHING — Weather (Open-Meteo, no key needed)
+# Fetching weather from Open-Meteo, which does not need a key.
 # ---------------------------------------------------------------------------
 def fetch_weather_range(start_date: str, end_date: str) -> pd.DataFrame:
-    """start_date/end_date as 'YYYY-MM-DD'. Uses the historical archive endpoint,
-    which also covers 'today' with a short delay, so it works for both backfill
-    and near-real-time hourly runs."""
+    """Fetch weather for a date range given as 'YYYY-MM-DD'.
+
+    This uses the historical archive endpoint, which also covers today with a
+    short delay, so it works for both backfills and hourly runs.
+    """
     params = {
         "latitude": config.LATITUDE,
         "longitude": config.LONGITUDE,
@@ -89,14 +91,14 @@ def fetch_weather_range(start_date: str, end_date: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# FEATURE ENGINEERING
+# Feature engineering.
 # ---------------------------------------------------------------------------
 def add_time_features(df):
     df["hour"] = df["datetime"].dt.hour
     df["day"] = df["datetime"].dt.day
     df["month"] = df["datetime"].dt.month
     df["day_of_week"] = df["datetime"].dt.dayofweek
-    # Cyclical encodings so the model understands hour 23 is close to hour 0
+    # Cyclical encodings help the model see that hour 23 is close to hour 0.
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
     df["day_of_week_sin"] = np.sin(2 * np.pi * df["day_of_week"] / 7)
@@ -105,33 +107,33 @@ def add_time_features(df):
 
 
 def add_target_and_lags(df):
-    """Assumes df is sorted ascending by datetime and roughly hourly cadence."""
+    """Assume df is sorted by datetime and roughly follows an hourly cadence."""
     df = df.sort_values("datetime").reset_index(drop=True)
 
-    # Target: US EPA AQI from PM2.5
+    # Build the AQI target from PM2.5.
     df["aqi"] = df["pm2_5"].apply(pm25_to_aqi)
 
-    # Lag features (24h / 48h / 72h back) — prevents leakage vs using lag-1
+    # Lag features from 24, 48, and 72 hours ago keep us from leaking the future.
     for lag_h in (24, 48, 72):
         df[f"aqi_lag_{lag_h}h"] = df["aqi"].shift(lag_h)
         df[f"pm2_5_lag_{lag_h}h"] = df["pm2_5"].shift(lag_h)
 
-    # Rolling stats over a 72h window
+    # Rolling stats over a 72-hour window.
     df["aqi_rolling_mean_72h"] = df["aqi"].rolling(window=72, min_periods=1).mean()
     df["aqi_rolling_std_72h"] = df["aqi"].rolling(window=72, min_periods=1).std()
     df["pm2_5_rolling_mean_72h"] = df["pm2_5"].rolling(window=72, min_periods=1).mean()
 
-    # Change rate (short-term trend signal)
+    # Short-term change rate.
     df["aqi_change_rate_1h"] = df["aqi"].diff(1)
 
-    # TRAINING TARGET: AQI 72 hours ahead (what we're forecasting)
+    # The training target is AQI 72 hours ahead.
     df["target_aqi_72h"] = df["aqi"].shift(-72)
 
     return df
 
 
 def build_feature_frame(pollution_df: pd.DataFrame, weather_df: pd.DataFrame, recompute_derived: bool = True) -> pd.DataFrame:
-    # Align both sources to the hour and merge
+    # Snap both sources to the hour before merging.
     pollution_df["datetime"] = pollution_df["datetime"].dt.floor("h")
     weather_df["datetime"] = weather_df["datetime"].dt.floor("h")
     merged = pd.merge(pollution_df, weather_df, on="datetime", how="inner")
@@ -139,25 +141,22 @@ def build_feature_frame(pollution_df: pd.DataFrame, weather_df: pd.DataFrame, re
     if recompute_derived:
         merged = add_target_and_lags(merged)
     else:
-        # Just the EPA AQI target for this row; lag/rolling features get
-        # computed later against full history (see run_current).
+        # Only the AQI target is needed here; lag and rolling features are
+        # rebuilt later against the full history in run_current.
         merged["aqi"] = merged["pm2_5"].apply(pm25_to_aqi)
     return merged
 
 
 # ---------------------------------------------------------------------------
-# MAIN FLOWS
+# Main flows.
 # ---------------------------------------------------------------------------
 def run_current(db: Database):
-    """Fetch the latest pollution + today's weather, recompute lag/rolling
-    features using recent history from the store (not just this new row),
-    and store the newest row.
+    """Fetch the latest pollution and weather, rebuild derived features, and
+    store the newest row.
 
-    IMPORTANT: lag/rolling features (24h/48h/72h lags, 72h rolling stats)
-    need prior history to compute correctly. Computing them against only
-    the single newly-fetched row would leave them all NaN — this pulls the
-    last ~80h of existing data from Mongo first so the new row's derived
-    features are computed properly, matching what backfill does.
+    Lag and rolling features need prior history to be correct. If we computed
+    them from only the fresh row, they would all be NaN, so this pulls about
+    80 hours of history from Mongo first and then rebuilds the features.
     """
     pollution_records = fetch_current_pollution()
     pollution_df = pollution_list_to_df(pollution_records)
@@ -170,14 +169,14 @@ def run_current(db: Database):
         print("[current] No matching pollution+weather rows this hour (weather data may lag). Skipping.")
         return
 
-    # Pull recent history (80h buffer covers the 72h lag window) to recompute
-    # lag/rolling features correctly for the new row(s).
+    # Pull a small history buffer so the lag and rolling features can be
+    # rebuilt correctly for the new row(s).
     history_df = db.load_recent_features(hours=80)
     combined = pd.concat([history_df, new_rows[["datetime"] + [c for c in new_rows.columns if c not in history_df.columns or c == "datetime"]]], ignore_index=True) if not history_df.empty else new_rows
     combined = combined.drop_duplicates(subset="datetime").sort_values("datetime").reset_index(drop=True)
     combined = add_target_and_lags(combined)
 
-    # Only the newest row(s) — matching the timestamps we just fetched — get inserted
+    # Only insert the newest rows that match the timestamps we just fetched.
     new_timestamps = set(new_rows["datetime"])
     to_insert = combined[combined["datetime"].isin(new_timestamps)]
 
@@ -191,11 +190,11 @@ def run_backfill(db: Database, days: int):
     start = end - timedelta(days=days)
     print(f"[backfill] {config.CITY_NAME}: {start.date()} -> {end.date()}")
 
-    # Weather: one call covers the whole range
+    # Weather data comes from one call for the whole range.
     weather_df = fetch_weather_range(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
     print(f"[backfill] weather rows: {len(weather_df)}")
 
-    # Pollutants: chunk in 7-day windows to be safe with the API
+    # Pollutant data is fetched in 7-day chunks to stay within API limits.
     all_pollution = []
     cursor = start
     chunk = timedelta(days=7)

@@ -1,10 +1,10 @@
-"""US EPA AQI conversion utilities.
+"""US EPA AQI conversion helpers.
 
 Reference breakpoints (PM2.5, 24-hr avg, µg/m^3) -> AQI (0-500):
 https://www.airnow.gov/aqi/aqi-basics/
 """
 
-# (C_low, C_high, I_low, I_high)
+# Each tuple is (C_low, C_high, I_low, I_high).
 PM25_BREAKPOINTS = [
     (0.0, 12.0, 0, 50),
     (12.1, 35.4, 51, 100),
@@ -19,11 +19,10 @@ PM25_BREAKPOINTS = [
 def pm25_to_aqi(pm25: float) -> float:
     """Convert a PM2.5 concentration (µg/m^3) to a US EPA AQI value (0-500).
 
-    EPA's breakpoint table is defined on PM2.5 rounded to 1 decimal place
-    (e.g. 12.0 / 12.1 are adjacent breakpoints with no gap between them).
-    Skipping this rounding leaves gaps like 12.01-12.09 uncovered by any
-    bracket, which silently falls through to the 500 (hazardous) fallback
-    for an otherwise ordinary reading — round first to avoid that.
+    EPA's breakpoint table uses PM2.5 rounded to one decimal place
+    (for example, 12.0 and 12.1 are adjacent breakpoints with no gap).
+    Without that rounding, values like 12.01-12.09 can fall through every
+    bucket and incorrectly land on the 500 fallback, so we round first.
     """
     if pm25 is None:
         return None
@@ -31,7 +30,7 @@ def pm25_to_aqi(pm25: float) -> float:
     for c_low, c_high, i_low, i_high in PM25_BREAKPOINTS:
         if c_low <= pm25 <= c_high:
             return round(((i_high - i_low) / (c_high - c_low)) * (pm25 - c_low) + i_low, 1)
-    # Above breakpoint table (hazardous, off the scale) -> cap at 500
+    # Anything above the table is off the scale, so cap it at 500.
     return 500.0
 
 

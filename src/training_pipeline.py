@@ -1,15 +1,16 @@
 """
-Training Pipeline - Pearls AQI Predictor (Karachi)
-====================================================
+Training pipeline for Pearls AQI Predictor (Karachi).
+
 - Pulls features from MongoDB
-- Chronological 80/20 train/test split (no shuffling - this is time series)
-- Trains Ridge Regression, Random Forest, XGBoost
-- Evaluates with RMSE, MAE, R2
-- Saves the best model locally (models/best_model.joblib) and its
-  metadata to MongoDB's `models` collection (model registry)
+- Uses a chronological 80/20 train/test split with no shuffling because this
+    is a time-series problem
+- Trains Ridge Regression, Random Forest, and XGBoost
+- Evaluates with RMSE, MAE, and R2
+- Saves the best model locally and stores metadata in MongoDB's models
+    collection
 
 Usage:
-    python -m src.training_pipeline
+        python -m src.training_pipeline
 """
 import os
 import joblib
@@ -30,7 +31,7 @@ from .database import Database
 
 MODELS_DIR = "models"
 
-# Columns that must NOT be used as model inputs (identifiers / leakage / target)
+# Columns that should never be used as model inputs.
 DROP_COLS = ["datetime", "aqi", "target_aqi_72h"]
 
 
@@ -38,23 +39,15 @@ def load_training_data(db: Database) -> pd.DataFrame:
     df = db.load_all_features()
     df = df.sort_values("datetime").reset_index(drop=True)
 
-    # --- Data quality fix ---
-    # OpenWeather occasionally returns a glitched pollutant reading for a
-    # single hour (e.g. stored aqi=500 while pm2_5=12, which is physically
-    # inconsistent since pm2_5=12 should map to an AQI of ~50). Because
-    # `target_aqi_72h` was pre-computed as a shift of `aqi` at ingestion
-    # time, a single bad row doesn't just corrupt itself — it becomes the
-    # *target* for a different row 72h earlier too. So we recompute `aqi`
-    # fresh from `pm2_5` (a deterministic, always-consistent function) and
-    # rebuild `target_aqi_72h` locally from that clean series, rather than
-    # trusting the values already stored in Mongo.
+    # Recompute AQI from PM2.5 so one bad stored reading does not contaminate
+    # the derived target values.
     from .aqi_utils import pm25_to_aqi
     df["aqi"] = df["pm2_5"].apply(pm25_to_aqi)
     df["target_aqi_72h"] = df["aqi"].shift(-72)
 
-    # Drop rows without a usable target (the most recent 72h)
+    # Drop rows without a usable target, which are the most recent 72 hours.
     df = df.dropna(subset=["target_aqi_72h"]).reset_index(drop=True)
-    # Drop rows still missing lag features (the earliest 72h)
+    # Drop rows that still lack lag features, which are the earliest 72 hours.
     lag_cols = [c for c in df.columns if "lag_72h" in c]
     df = df.dropna(subset=lag_cols).reset_index(drop=True)
     return df
@@ -80,13 +73,11 @@ def evaluate(y_true, y_pred) -> dict:
 
 
 def get_model_instances():
-    """Fresh, unfitted model instances (used per-fold in CV and for the final fit).
+    """Return fresh, unfitted model instances for CV and the final fit.
 
-    Ridge is wrapped with StandardScaler: our lag/rolling features are highly
-    correlated with raw pm2_5 (multicollinearity), and without scaling, Ridge's
-    coefficients can blow up on ill-conditioned folds (seen as RMSE=51 on one
-    CV fold before this fix). A stronger alpha also adds more regularization
-    headroom given we only have ~900 rows and 32 features.
+    Ridge is wrapped with StandardScaler because the lag and rolling features
+    are highly correlated with raw pm2_5. Without scaling, Ridge can behave
+    poorly on some folds, so we also use a stronger alpha for stability.
     """
     return {
         "ridge": make_pipeline(StandardScaler(), Ridge(alpha=10.0)),
@@ -103,11 +94,11 @@ def get_model_instances():
 
 
 def time_series_cv_evaluate(df, feature_cols, n_splits=5):
-    """Rolling-origin time series CV: trains on an expanding window, tests on
-    the next chunk, repeated n_splits times. Averaging across folds gives a
-    far more reliable estimate than one fixed chronological split, which is
-    highly sensitive to whether the single test window happens to look like
-    the training period or not (exactly what we saw with a single split)."""
+    """Run rolling-origin time-series CV with an expanding training window.
+
+    Each fold trains on the past and tests on the next chunk. Averaging across
+    folds is more reliable than leaning on one fixed chronological split.
+    """
     tscv = TimeSeriesSplit(n_splits=n_splits)
     X, y = df[feature_cols], df["target_aqi_72h"]
 
@@ -125,7 +116,7 @@ def time_series_cv_evaluate(df, feature_cols, n_splits=5):
             print(f"  fold {fold_i} [{name:>13}] RMSE={m['rmse']:.2f} MAE={m['mae']:.2f} R2={m['r2']:.3f} "
                   f"(train={len(train_idx)}, test={len(test_idx)})")
 
-    # Average metrics across folds
+    # Average the metrics across folds.
     avg_metrics = {}
     for name, folds in fold_metrics.items():
         avg_metrics[name] = {
@@ -167,14 +158,14 @@ def main():
     print(f"Train range: {train_df['datetime'].min()} -> {train_df['datetime'].max()}")
     print(f"Test range:  {test_df['datetime'].min()} -> {test_df['datetime'].max()}")
 
-    # --- Naive baselines (sanity check: models should beat these) ---
+    # Naive baselines to make sure the models are actually doing useful work.
     naive_pred = train_df["target_aqi_72h"].mean()
     naive_rmse = np.sqrt(mean_squared_error(test_df["target_aqi_72h"], [naive_pred] * len(test_df)))
     persistence_rmse = np.sqrt(mean_squared_error(test_df["target_aqi_72h"], test_df["aqi"]))
     print(f"\nBaseline RMSE (predict train mean): {naive_rmse:.2f}")
     print(f"Baseline RMSE (persistence, aqi unchanged in 72h): {persistence_rmse:.2f}")
 
-    # --- Time-series cross-validation (the real, reportable evaluation) ---
+    # Time-series cross-validation is the main reportable evaluation.
     print("\n--- Time-series cross-validation (5 rolling folds) ---")
     cv_metrics = time_series_cv_evaluate(df, feature_cols, n_splits=5)
     print("\n--- CV average across folds ---")
@@ -182,7 +173,7 @@ def main():
         beats_baseline = "✓ beats baseline" if m["rmse"] < naive_rmse else "✗ worse than baseline"
         print(f"{name:>15}  RMSE={m['rmse']:.2f}  MAE={m['mae']:.2f}  R2={m['r2']:.3f}  ({beats_baseline})")
 
-    # --- Final fit on the 80/20 split (for the deployed model + dashboard) ---
+    # Final fit on the 80/20 split for the deployed model and dashboard.
     print("\n--- Final single-split fit (used for deployed model) ---")
     results = train_models(train_df, test_df, feature_cols)
 
@@ -191,24 +182,24 @@ def main():
         m = r["metrics"]
         print(f"{name:>15}  RMSE={m['rmse']:.2f}  MAE={m['mae']:.2f}  R2={m['r2']:.3f}")
 
-    # Pick best by CV RMSE (more reliable than a single split's RMSE)
+    # Pick the best model by CV RMSE, which is more reliable than one split.
     best_name = min(cv_metrics, key=lambda n: cv_metrics[n]["rmse"])
     best_model = results[best_name]["model"]
     best_metrics = results[best_name]["metrics"]
     print(f"\nBest model (by CV): {best_name} (CV RMSE={cv_metrics[best_name]['rmse']:.2f})")
 
-    # Save locally
+    # Save the trained artifacts locally.
     os.makedirs(MODELS_DIR, exist_ok=True)
     model_path = os.path.join(MODELS_DIR, "best_model.joblib")
     joblib.dump(best_model, model_path)
     joblib.dump(feature_cols, os.path.join(MODELS_DIR, "feature_columns.joblib"))
     print(f"Saved best model -> {model_path}")
 
-    # Also save each model individually (useful for report/comparison + SHAP later)
+    # Save each model on its own for comparison and later SHAP analysis.
     for name, r in results.items():
         joblib.dump(r["model"], os.path.join(MODELS_DIR, f"{name}_model.joblib"))
 
-    # Save metadata / registry entry to MongoDB
+    # Store the training metadata in MongoDB.
     metadata = {
         "trained_at": datetime.now(tz=timezone.utc),
         "best_model_name": best_name,

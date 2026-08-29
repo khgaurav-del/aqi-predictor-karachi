@@ -1,8 +1,8 @@
 """
-SHAP Feature Importance - Pearls AQI Predictor
-================================================
-Explains which features drive the trained model's 72h-ahead AQI predictions.
-Generates a summary plot (saved as PNG) and prints ranked feature importance.
+SHAP feature importance for Pearls AQI Predictor.
+
+Explains which features matter most for the trained model's 72-hour AQI
+predictions, saves summary plots, and prints a ranked importance list.
 
 Usage:
     python shap_analysis.py
@@ -38,19 +38,14 @@ def main():
 
     print(f"Computing SHAP values for {len(X_test)} test rows...")
 
-    # Use the model-agnostic Explainer for all model types. TreeExplainer is
-    # faster for tree models, but it depends on parsing internal model
-    # attributes that vary between XGBoost versions — this installation's
-    # XGBoost stores base_score in a format TreeExplainer's parser rejects
-    # (see: https://github.com/shap/shap/issues — a known version mismatch).
-    # The generic Explainer works against any model's predict() function
-    # regardless of internal format, so it avoids that entirely.
-    print("Using model-agnostic Explainer (avoids XGBoost/SHAP version mismatch in TreeExplainer)...")
+    # Use the model-agnostic Explainer so we do not depend on SHAP parsing
+    # XGBoost internals that can change across versions.
+    print("Using the model-agnostic Explainer to avoid SHAP/XGBoost version mismatch issues...")
     background = X_test.sample(min(50, len(X_test)), random_state=42)
     explainer = shap.Explainer(model.predict, background)
     shap_values = explainer(X_test)
 
-    # --- Summary bar plot: mean |SHAP value| per feature ---
+    # Summary bar plot: average absolute SHAP value per feature.
     plt.figure()
     shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
     plt.title("Feature Importance — 72h AQI Forecast")
@@ -60,7 +55,7 @@ def main():
     plt.close()
     print(f"Saved bar plot -> {bar_path}")
 
-    # --- Beeswarm summary plot: shows direction of effect, not just magnitude ---
+    # Beeswarm plot: shows both direction and size of each effect.
     plt.figure()
     shap.summary_plot(shap_values, X_test, show=False)
     plt.title("SHAP Summary — 72h AQI Forecast")
@@ -70,7 +65,7 @@ def main():
     plt.close()
     print(f"Saved beeswarm plot -> {beeswarm_path}")
 
-    # --- Print ranked importance as text (easy to paste into report) ---
+    # Print the ranking as text so it is easy to reuse in a report.
     vals = np.abs(shap_values.values).mean(axis=0)
     importance = pd.Series(vals, index=feature_cols).sort_values(ascending=False)
 

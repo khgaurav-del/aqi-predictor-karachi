@@ -1,4 +1,4 @@
-"""Quick sanity check on the feature store — run after backfill to confirm data quality."""
+"""Quick feature-store check for after a backfill or pipeline run."""
 import pandas as pd
 from src.database import Database
 
