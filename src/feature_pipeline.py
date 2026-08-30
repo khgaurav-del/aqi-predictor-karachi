@@ -175,6 +175,15 @@ def run_current(db: Database):
     # columns by name automatically (filling NaN for any that don't match),
     # so no manual column-matching is needed here.
     history_df = db.load_recent_features(hours=80)
+    # Ensure both frames use timezone-aware UTC timestamps before combining.
+    # MongoDB round-trips datetimes as naive by default, while new_rows is
+    # built with explicit UTC-aware timestamps — mixing the two makes
+    # sort_values() unable to compare them (TypeError: tz-naive vs tz-aware).
+    if not history_df.empty and history_df["datetime"].dt.tz is None:
+        history_df["datetime"] = history_df["datetime"].dt.tz_localize("UTC")
+    if new_rows["datetime"].dt.tz is None:
+        new_rows["datetime"] = new_rows["datetime"].dt.tz_localize("UTC")
+
     combined = pd.concat([history_df, new_rows], ignore_index=True) if not history_df.empty else new_rows
     combined = combined.drop_duplicates(subset="datetime").sort_values("datetime").reset_index(drop=True)
     combined = add_target_and_lags(combined)
